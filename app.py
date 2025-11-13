@@ -2,14 +2,15 @@ import streamlit as st
 import pandas as pd
 from crewai import Agent, Task, Crew, Process
 from crewai_tools import SerperDevTool
-from groq import Groq
+from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
 import os
 import json
 import time
 from datetime import datetime
+import re
 
-# --- Configuration & Secrets ---
+# --- Configuration ---
 # Set these in Streamlit Cloud secrets: SERPER_API_KEY, GROQ_API_KEY
 
 # --- Enhanced Output Schema ---
@@ -22,7 +23,7 @@ class CompanyData(BaseModel):
     headquarters_location: str = Field(description="Headquarters city, country, and source.")
     revenue_source: str = Field(description="Revenue data point and specific source (ZoomInfo/Owler/Apollo/News).")
     
-    # Core Research Fields (Your main columns)
+    # Core Research Fields
     branch_network_count: str = Field(description="Number of branches/facilities mentioned online and source.")
     expansion_news_12mo: str = Field(description="Summary of expansion news in the last 12 months and source link.")
     digital_transformation_initiatives: str = Field(description="Details on smart infra or digital programs and source link.")
@@ -38,56 +39,49 @@ class CompanyData(BaseModel):
     why_relevant_to_syntel: str = Field(description="Why this company is a relevant lead for Syntel (based on all data).")
     intent_scoring: int = Field(description="Intent score 1-10 based on buying signals detected.")
 
-# --- Enhanced Agents ---
+# Initialize Groq LLM properly for CrewAI
+def get_groq_llm():
+    """Initialize Groq LLM with LangChain compatibility"""
+    return ChatGroq(
+        model="llama-3.3-70b-versatile",
+        groq_api_key=st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY")),
+        temperature=0.3
+    )
 
-# Research Specialist Agent - Focused on finding specific data
+# --- Enhanced Agents ---
 research_specialist = Agent(
     role='Business Intelligence Research Specialist',
-    goal="""
-    Conduct deep, targeted research to find specific business intelligence data for {company_name}.
-    Your primary focus is finding verifiable information for ALL requested fields with source URLs.
-    Never leave any field empty - if information is not available, state "Not found in research" with reasoning.
-    """,
+    goal="Conduct deep, targeted research to find specific business intelligence data with source URLs for all requested fields.",
     backstory="""Expert in business intelligence with 15+ years experience finding hard-to-locate corporate data.
     Specializes in identifying expansion news, IT infrastructure changes, and digital transformation initiatives.
     Known for meticulous source verification and comprehensive data collection.""",
     tools=[SerperDevTool()],
     verbose=True,
     allow_delegation=False,
-    llm=Groq(model_name="llama3-70b-8192")
+    llm=get_groq_llm()
 )
 
-# Data Validation & Enrichment Agent
 data_validator = Agent(
     role='Data Quality & Enrichment Specialist',
-    goal="""
-    Review and enrich the research data. Ensure ALL fields have meaningful data with proper sources.
-    Cross-verify information from multiple sources when possible.
-    Calculate accurate intent scoring based on concrete business signals found.
-    """,
+    goal="Review and enrich research data. Ensure ALL fields have meaningful data with proper sources and calculate accurate intent scoring.",
     backstory="""Data quality expert with background in business analytics and market intelligence.
     Excellent at identifying weak data points and finding additional sources to strengthen research.
     Specializes in intent signal detection and relevance analysis.""",
     tools=[SerperDevTool()],
     verbose=True,
     allow_delegation=False,
-    llm=Groq(model_name="llama3-70b-8192")
+    llm=get_groq_llm()
 )
 
-# Formatting & Output Agent
 formatter = Agent(
     role='Data Formatting & Schema Specialist',
-    goal=f"""
-    Format the validated research data into the exact JSON schema: {CompanyData.schema_json()}.
-    Ensure every single field is populated with appropriate data and source citations.
-    Maintain strict adherence to the Pydantic schema structure.
-    """,
+    goal="Format validated research data into the exact JSON schema ensuring every field is populated with appropriate data and source citations.",
     backstory="""Technical data specialist with expertise in data formatting and schema compliance.
     Ensures all output meets specified standards and is ready for downstream processing.
     Meticulous about data structure and field completion.""",
     verbose=True,
     allow_delegation=False,
-    llm=Groq(model_name="llama-3.3-70b-versatile")
+    llm=get_groq_llm()
 )
 
 # --- Enhanced Research Tasks ---
@@ -173,18 +167,16 @@ def create_research_tasks(company_name):
         - Intent scoring (1-10 integer) must reflect research findings
         - "Why Relevant to Syntel" must be specific and actionable
         
-        SCHEMA: {CompanyData.schema_json()}
-        
         Output must be valid JSON that can be parsed by the Pydantic model.
         """,
         agent=formatter,
         expected_output="Perfectly formatted JSON output matching the CompanyData schema",
-        output_file=f"{company_name.replace(' ', '_')}_data.json"
+        output_json=CompanyData
     )
     
     return [research_task, validation_task, formatting_task]
 
-# --- Enhanced Streamlit UI ---
+# --- Streamlit UI ---
 st.set_page_config(
     page_title="Syntel Business Intelligence Agent", 
     page_icon="🏢",
@@ -239,119 +231,126 @@ if research_button:
                 status_text.info("🔍 Phase 3/3: Final formatting...")
                 progress_bar.progress(80)
                 
-                # Wait for file to be created
-                time.sleep(3)
-                
+                # Get the result
                 progress_bar.progress(100)
                 status_text.success("✅ Research Complete!")
                 
                 # Display results
-                filename = f"{company_input.replace(' ', '_')}_data.json"
-                if os.path.exists(filename):
-                    with open(filename, 'r') as f:
-                        try:
-                            data = json.load(f)
+                st.success(f"✅ Comprehensive research completed for {company_input}")
+                
+                # Parse and display the result
+                try:
+                    # Try to extract JSON from the result
+                    result_text = str(result)
+                    
+                    # Look for JSON pattern in the result
+                    json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group()
+                        data = json.loads(json_str)
+                        
+                        # Validate with Pydantic
+                        validated_data = CompanyData(**data)
+                        
+                        # Store in session state
+                        research_entry = {
+                            "company": company_input,
+                            "timestamp": datetime.now().isoformat(),
+                            "data": validated_data.dict()
+                        }
+                        st.session_state.research_history.append(research_entry)
+                        
+                        # Create tabs for different views
+                        tab1, tab2, tab3 = st.tabs(["📊 Data Table", "🔍 Detailed View", "📈 Analysis"])
+                        
+                        with tab1:
+                            # Convert to DataFrame for nice display
+                            display_data = []
+                            for field, value in validated_data.dict().items():
+                                display_data.append({
+                                    "Field": field.replace("_", " ").title(),
+                                    "Value": str(value)[:200] + "..." if len(str(value)) > 200 else str(value),
+                                    "Full Value": value
+                                })
                             
-                            # Validate with Pydantic
-                            validated_data = CompanyData(**data)
+                            df = pd.DataFrame(display_data)
+                            st.dataframe(df[["Field", "Value"]], use_container_width=True, hide_index=True)
+                        
+                        with tab2:
+                            # Detailed view with source links
+                            st.subheader("🔍 Detailed Research Results")
+                            data_dict = validated_data.dict()
                             
-                            # Store in session state
-                            research_entry = {
-                                "company": company_input,
-                                "timestamp": datetime.now().isoformat(),
-                                "data": validated_data.dict()
+                            categories = {
+                                "🏢 Basic Company Info": [
+                                    "linkedin_url", "company_website_url", "industry_category",
+                                    "employee_count_linkedin", "headquarters_location", "revenue_source"
+                                ],
+                                "📈 Core Business Intelligence": [
+                                    "branch_network_count", "expansion_news_12mo", "digital_transformation_initiatives",
+                                    "it_leadership_change", "existing_network_vendors", "wifi_lan_tender_found",
+                                    "iot_automation_edge_integration", "cloud_adoption_gcc_setup", 
+                                    "physical_infrastructure_signals", "it_infra_budget_capex"
+                                ],
+                                "🎯 Analysis & Scoring": [
+                                    "why_relevant_to_syntel", "intent_scoring"
+                                ]
                             }
-                            st.session_state.research_history.append(research_entry)
                             
-                            # Display in nice format
-                            st.success(f"✅ Comprehensive research completed for {company_input}")
+                            for category, fields in categories.items():
+                                with st.expander(category, expanded=True):
+                                    for field in fields:
+                                        if field in data_dict:
+                                            col1, col2 = st.columns([3, 1])
+                                            with col1:
+                                                st.markdown(f"**{field.replace('_', ' ').title()}**")
+                                                st.write(data_dict[field])
+                                            with col2:
+                                                # Check if value contains URL and make it clickable
+                                                if isinstance(data_dict[field], str) and 'http' in data_dict[field]:
+                                                    urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', data_dict[field])
+                                                    for url in urls[:2]:  # Show first 2 URLs
+                                                        st.markdown(f'[🔗 Source]({url})')
+                                            st.divider()
+                        
+                        with tab3:
+                            # Analysis tab
+                            st.subheader("📈 Business Intelligence Analysis")
                             
-                            # Create tabs for different views
-                            tab1, tab2, tab3 = st.tabs(["📊 Data Table", "🔍 Detailed View", "📈 Analysis"])
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Intent Score", f"{validated_data.intent_scoring}/10")
+                            with col2:
+                                # Calculate data completeness
+                                filled_fields = sum(1 for value in validated_data.dict().values() if value and str(value).strip() and "not found" not in str(value).lower())
+                                total_fields = len(validated_data.dict())
+                                completeness = (filled_fields / total_fields) * 100
+                                st.metric("Data Completeness", f"{completeness:.1f}%")
+                            with col3:
+                                st.metric("Research Date", datetime.now().strftime("%Y-%m-%d"))
                             
-                            with tab1:
-                                # Convert to DataFrame for nice display
-                                display_data = []
-                                for field, value in validated_data.dict().items():
-                                    display_data.append({
-                                        "Field": field.replace("_", " ").title(),
-                                        "Value": str(value)[:200] + "..." if len(str(value)) > 200 else str(value),
-                                        "Full Value": value
-                                    })
-                                
-                                df = pd.DataFrame(display_data)
-                                st.dataframe(df[["Field", "Value"]], use_container_width=True, hide_index=True)
+                            # Relevance analysis
+                            st.subheader("🎯 Relevance to Syntel")
+                            st.info(validated_data.why_relevant_to_syntel)
                             
-                            with tab2:
-                                # Detailed view with source links
-                                st.subheader("🔍 Detailed Research Results")
-                                data_dict = validated_data.dict()
-                                
-                                categories = {
-                                    "🏢 Basic Company Info": [
-                                        "linkedin_url", "company_website_url", "industry_category",
-                                        "employee_count_linkedin", "headquarters_location", "revenue_source"
-                                    ],
-                                    "📈 Core Business Intelligence": [
-                                        "branch_network_count", "expansion_news_12mo", "digital_transformation_initiatives",
-                                        "it_leadership_change", "existing_network_vendors", "wifi_lan_tender_found",
-                                        "iot_automation_edge_integration", "cloud_adoption_gcc_setup", 
-                                        "physical_infrastructure_signals", "it_infra_budget_capex"
-                                    ],
-                                    "🎯 Analysis & Scoring": [
-                                        "why_relevant_to_syntel", "intent_scoring"
-                                    ]
-                                }
-                                
-                                for category, fields in categories.items():
-                                    with st.expander(category, expanded=True):
-                                        for field in fields:
-                                            if field in data_dict:
-                                                col1, col2 = st.columns([3, 1])
-                                                with col1:
-                                                    st.markdown(f"**{field.replace('_', ' ').title()}**")
-                                                    st.write(data_dict[field])
-                                                with col2:
-                                                    # Check if value contains URL and make it clickable
-                                                    if isinstance(data_dict[field], str) and 'http' in data_dict[field]:
-                                                        urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', data_dict[field])
-                                                        for url in urls[:2]:  # Show first 2 URLs
-                                                            st.markdown(f'[🔗 Source]({url})')
-                                                st.divider()
-                            
-                            with tab3:
-                                # Analysis tab
-                                st.subheader("📈 Business Intelligence Analysis")
-                                
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric("Intent Score", f"{validated_data.intent_scoring}/10")
-                                with col2:
-                                    # Calculate data completeness
-                                    filled_fields = sum(1 for value in validated_data.dict().values() if value and str(value).strip() and "not found" not in str(value).lower())
-                                    total_fields = len(validated_data.dict())
-                                    completeness = (filled_fields / total_fields) * 100
-                                    st.metric("Data Completeness", f"{completeness:.1f}%")
-                                with col3:
-                                    st.metric("Research Date", datetime.now().strftime("%Y-%m-%d"))
-                                
-                                # Relevance analysis
-                                st.subheader("🎯 Relevance to Syntel")
-                                st.info(validated_data.why_relevant_to_syntel)
-                                
-                                # Download button
-                                st.download_button(
-                                    label="📥 Download JSON Data",
-                                    data=json.dumps(validated_data.dict(), indent=2),
-                                    file_name=filename,
-                                    mime="application/json"
-                                )
-                            
-                        except Exception as e:
-                            st.error(f"Error parsing results: {str(e)}")
-                            st.json(data)  # Show raw JSON if parsing fails
-                else:
-                    st.error("Research completed but output file not found. Check the logs for details.")
+                            # Download button
+                            filename = f"{company_input.replace(' ', '_')}_data.json"
+                            st.download_button(
+                                label="📥 Download JSON Data",
+                                data=json.dumps(validated_data.dict(), indent=2),
+                                file_name=filename,
+                                mime="application/json"
+                            )
+                    
+                    else:
+                        # If no JSON found, show raw result
+                        st.warning("Could not parse structured data. Showing raw result:")
+                        st.write(result)
+                        
+                except Exception as e:
+                    st.error(f"Error parsing results: {str(e)}")
+                    st.write("Raw result:")
+                    st.write(result)
                     
             except Exception as e:
                 st.error(f"Research failed: {str(e)}")
@@ -369,11 +368,19 @@ if st.session_state.research_history:
         with st.sidebar.expander(f"{research['company']} - {research['timestamp'][:10]}", expanded=False):
             st.write(f"Intent Score: {research['data'].get('intent_scoring', 'N/A')}/10")
             if st.button(f"Load {research['company']}", key=f"load_{i}"):
-                st.session_state.current_company = research['company']
+                company_input = research['company']
                 st.rerun()
 
 # Instructions
 with st.sidebar.expander("📖 Setup Instructions"):
     st.markdown("""
-   
+    **Required API Keys (set in Streamlit Cloud secrets):**
+    - `GROQ_API_KEY`: Get from [groq.com](https://groq.com)
+    - `SERPER_API_KEY`: Get from [serper.dev](https://serper.dev) - $50 free credit
+    
+    **How it works:**
+    1. **Research Specialist** finds data with sources
+    2. **Data Validator** verifies and enriches information  
+    3. **Formatter** creates structured output
+    4. **All 18 fields** are filled with source links
     """)
