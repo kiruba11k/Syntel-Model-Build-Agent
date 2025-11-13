@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 from crewai import Agent, Task, Crew, Process
 from crewai_tools import SerperDevTool
-# REMOVED: from langchain_google_genai import ChatGoogleGenerativeAI 
-from langchain_community.llms import FakeListLLM # KEEP: For mock data fallback
+from langchain_community.llms import FakeListLLM 
 from pydantic import BaseModel, Field
 import os
 import json
@@ -15,14 +14,13 @@ import sys
 # --- Configuration & Deployment Check ---
 # You MUST set both keys in Streamlit secrets
 SERPER_API_KEY = st.secrets.get("SERPER_API_KEY")
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") # NEW REQUIRED KEY
-# GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") # NEW REQUIRED KEY
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
 
 if not SERPER_API_KEY:
     st.error("❌ ERROR: SERPER_API_KEY not found in Streamlit secrets. Please set it to enable search.")
     st.stop()
 
-# --- Output Schema (No Change) ---
+# --- Output Schema ---
 class CompanyData(BaseModel):
     # Basic Company Info
     linkedin_url: str = Field(description="LinkedIn URL and source/confidence.")
@@ -48,19 +46,66 @@ class CompanyData(BaseModel):
     why_relevant_to_syntel: str = Field(description="Why this company is a relevant lead for Syntel (based on all data).")
     intent_scoring: int = Field(description="Intent score 1-10 based on buying signals detected.")
 
-# FIX 2: Replaced OpenAI/Ollama with the Gemini API for deployment
+# --- Helper Function for Custom Table Formatting ---
+def format_data_for_display(company_input: str, validated_data: CompanyData) -> pd.DataFrame:
+    """Transforms the Pydantic model into the specific 1-row table format required."""
+    data_dict = validated_data.dict()
+    
+    # Define the exact output column names and map them to the Pydantic fields
+    mapping = {
+        "Company Name": company_input, # Special case: use the input variable
+        "LinkedIn URL": "linkedin_url",
+        "Company Website URL": "company_website_url",
+        "Industry Category": "industry_category",
+        "Employee Count (LinkedIn)": "employee_count_linkedin",
+        "Headquarters (Location)": "headquarters_location",
+        "Revenue (ZoomInfo / Owler / Apollo)": "revenue_source",
+        "Branch Network / Facilities Count": "branch_network_count",
+        "Expansion News (Last 12 Months)": "expansion_news_12mo",
+        "Digital Transformation Initiatives / Smart Infra Programs": "digital_transformation_initiatives",
+        "IT Infrastructure Leadership Change (CIO / CTO / Head Infra)": "it_leadership_change",
+        "Existing Network Vendors / Tech Stack": "existing_network_vendors",
+        "Recent Wi-Fi Upgrade or LAN Tender Found": "wifi_lan_tender_found",
+        "IoT / Automation / Edge Integration Mentioned": "iot_automation_edge_integration",
+        "Cloud Adoption / GCC Setup": "cloud_adoption_gcc_setup",
+        "Physical Infrastructure Signals": "physical_infrastructure_signals",
+        "IT Infra Budget / Capex Allocation": "it_infra_budget_capex",
+        "Why Relevent to Syntel": "why_relevant_to_syntel",
+        "Intent scoring": "intent_scoring",
+    }
+    
+    # Create the single row of data
+    row_data = {}
+    for display_col, pydantic_field in mapping.items():
+        if display_col == "Company Name":
+             # Use the company input directly
+            row_data[display_col] = pydantic_field 
+        else:
+            # Get data from the Pydantic model dictionary
+            row_data[display_col] = data_dict.get(pydantic_field, "N/A")
+            
+    # Convert the single dictionary entry into a DataFrame with one row
+    df = pd.DataFrame([row_data])
+    
+    # Set the index to an empty string to remove the '0' row label
+    df.index = ['']
+    
+    return df
+
+
+# --- LLM Initialization (Uses LiteLLM and GEMINI_API_KEY from environment) ---
 def get_llm():
     if GEMINI_API_KEY:
-        st.info("Using Gemini 2.5 Flash for live research.")
+        # Tweak the info message to reflect the model you are using
+        st.info("Using Gemini 2.5 Flash-Lite for high-throughput live research.") 
         
-        # **CRITICAL FIX:** Return the model name in the LiteLLM format: provider/model
-        # LiteLLM automatically uses the GEMINI_API_KEY from the environment.
+        # This is the stable, high-throughput model we agreed upon
         return "gemini/gemini-2.5-flash-lite"
-        
         
     else:
         # Fallback to a mock LLM if key is missing
-        st.warning("⚠️ WARNING: GROQI_API_KEY not found. Using a mock LLM for demonstration (no actual research will occur).")
+        st.warning("⚠️ WARNING: GEMINI_API_KEY not found. Using a mock LLM for demonstration (no actual research will occur).")
+        # Ensure the mock data conforms to the schema exactly
         responses = [json.dumps(CompanyData(
             linkedin_url="Mock: linkedin.com/company/mockco", 
             company_website_url="Mock: mockco.com", 
@@ -69,7 +114,7 @@ def get_llm():
             headquarters_location="Mock: Streamlit Cloud", 
             revenue_source="Mock: $1B (FakeListLLM)", 
             branch_network_count="Mock: 50+", 
-            expansion_news_12mo="Mock: No real news - using FakeLLM.", 
+            expansion_news_12mo="Mock: New APAC data center announced, Q3 2026 completion. Source: FakeNews.com", 
             digital_transformation_initiatives="Mock: Placeholder data for schema compliance.", 
             it_leadership_change="Mock: CIO John Doe (Fake Source)", 
             existing_network_vendors="Mock: Cisco, Arista", 
@@ -89,6 +134,7 @@ llm = get_llm()
 # --- Agents ---
 search_tool = SerperDevTool()
 
+# Agents remain the same
 research_specialist = Agent(
     role='Business Intelligence Research Specialist',
     goal="Conduct deep, targeted research to find specific business intelligence data with source URLs for all requested fields.",
@@ -116,7 +162,7 @@ formatter = Agent(
     verbose=True,
     allow_delegation=False,
     llm=llm,
-    output_json=CompanyData
+    output_json=CompanyData # This tells the agent to enforce the schema
 )
 
 # --- Research Tasks (No Change) ---
@@ -125,8 +171,9 @@ def create_research_tasks(company_name):
     research_task = Task(
         description=f"""
         CONDUCT COMPREHENSIVE RESEARCH FOR: {company_name}
-        ... (rest of the description is fine)
-        CRITICAL: Provide source URLs for every piece of information found.
+        --
+        Your task is to find a single, definitive data point and source URL for every field listed in the schema.
+        CRITICAL: Provide source URLs for every piece of information found. If information cannot be found, state 'Not Found' and the search terms used.
         """,
         agent=research_specialist,
         expected_output="Comprehensive research notes with data for all fields and source URLs"
@@ -135,7 +182,9 @@ def create_research_tasks(company_name):
     validation_task = Task(
         description=f"""
         VALIDATE AND ENRICH RESEARCH DATA FOR: {company_name}
-        ... (rest of the description is fine)
+        --
+        Review the research notes and ensure every field is populated or clearly marked 'Not Found'.
+        Calculate a final 'Intent Scoring' (1-10) based on all the buying signals detected (Expansion, Infra Budget, IT Leadership Change, IoT adoption, etc.).
         FINAL OUTPUT: Validated, enriched dataset ready for formatting.
         """,
         agent=data_validator,
@@ -150,9 +199,7 @@ def create_research_tasks(company_name):
         
         REQUIREMENTS:
         - All 18 fields must be populated
-        - Source URLs must be included where specified
-        - Data types must match schema requirements
-        - Intent scoring (1-10 integer) must reflect research findings
+        - Intent scoring must be an integer (1-10)
         - "Why Relevant to Syntel" must be specific and actionable
         
         Output must be valid JSON that can be parsed by the Pydantic model. **ONLY OUTPUT THE JSON STRING. DO NOT ADD ANY MARKDOWN OR EXPLANATORY TEXT.**
@@ -163,39 +210,44 @@ def create_research_tasks(company_name):
     
     return [research_task, validation_task, formatting_task]
 
-# --- Streamlit UI (Updated for clarity on the new key) ---
+# --- Streamlit UI ---
 st.set_page_config(
     page_title="Syntel Business Intelligence Agent", 
     layout="wide"
 )
 
 st.title("Syntel Company Data AI Agent")
-st.markdown("### Powered by CrewAI and Gemini/Serper Search")
+st.markdown("### Powered by CrewAI and Gemini/Serper Search ")
 
 # Initialize session state
 if 'research_history' not in st.session_state:
     st.session_state.research_history = []
+if 'company_input' not in st.session_state:
+    st.session_state.company_input = "Snowman Logistics"
 
 # Input section
 col1, col2 = st.columns([2, 1])
 with col1:
-    company_input = st.text_input("Enter the company name to research:", "Wipro")
+    company_input = st.text_input("Enter the company name to research:", st.session_state.company_input, key="company_input_widget")
 with col2:
     with st.form("research_form"):
         submitted = st.form_submit_button("Start Deep Research", type="primary")
 
 if submitted:
+    st.session_state.company_input = company_input
+    
     if not company_input:
         st.warning("Please enter a company name.")
+        st.stop()
     else:
         if isinstance(llm, FakeListLLM):
-             st.warning("Research is running with **Mock Data** (FakeListLLM). Please provide a **`GEMINI_API_KEY`** in Streamlit secrets for live results.")
-             time.sleep(1) 
+              st.warning("Research is running with **Mock Data** (FakeListLLM). Please provide a **`GEMINI_API_KEY`** in Streamlit secrets for live results.")
+              time.sleep(1) 
 
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        with st.spinner("AI Agents are conducting deep research... This may take 2-3 minutes."):
+        with st.spinner(f"AI Agents are conducting deep research on **{company_input}**... This may take 2-3 minutes."):
             try:
                 status_text.info("Phase 1/3: Initial research started...")
                 progress_bar.progress(20)
@@ -217,18 +269,20 @@ if submitted:
                 progress_bar.progress(80)
                 
                 progress_bar.progress(100)
-                status_text.success("Research Complete!")
+                status_text.success(f"Research Complete for {company_input}!")
                 
-                st.success(f"Comprehensive research completed for {company_input}")
+                st.success(f"Comprehensive research completed for **{company_input}**")
                 
                 try:
                     result_text = str(result)
                     
+                    # Regex to find the JSON object. This is more robust than just slicing.
                     json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
                     if json_match:
                         json_str = json_match.group()
                         data = json.loads(json_str)
-                        validated_data = CompanyData(**data)
+                        # Validate the final JSON against the Pydantic schema
+                        validated_data = CompanyData(**data) 
                         
                         research_entry = {
                             "company": company_input,
@@ -237,19 +291,19 @@ if submitted:
                         }
                         st.session_state.research_history.append(research_entry)
                         
-                        tab1, tab2, tab3 = st.tabs(["Data Table", "Detailed View", "Analysis"])
+                        # --- Display Tabs ---
+                        tab1, tab2, tab3 = st.tabs(["📊 Final Report Table", "📋 Detailed View", "📈 Analysis Summary"])
                         
                         with tab1:
-                            display_data = []
-                            for field, value in validated_data.dict().items():
-                                display_data.append({
-                                    "Field": field.replace("_", " ").title(),
-                                    "Value": str(value)[:200] + "..." if len(str(value)) > 200 else str(value)
-                                })
+                            st.subheader(f"Final Business Intelligence Report for {company_input}")
                             
-                            df = pd.DataFrame(display_data)
-                            st.dataframe(df, use_container_width=True, hide_index=True)
-                        
+                            # Use the new formatting function to get the desired single-row table
+                            final_df = format_data_for_display(company_input, validated_data)
+                            
+                            st.dataframe(final_df, use_container_width=True, height=200) 
+                            
+                            st.caption("The table can be scrolled horizontally to view all 19 columns.")
+
                         with tab2:
                             st.subheader("Detailed Research Results")
                             data_dict = validated_data.dict()
@@ -307,51 +361,46 @@ if submitted:
                         st.code(result, language='json')
                         
                 except Exception as e:
-                    st.error(f"Error parsing results: {str(e)}")
-                    st.write("Raw result:")
+                    st.error(f"Error processing final results: {type(e).__name__} - {str(e)}")
+                    st.write("Raw result of the last task:")
                     st.code(result)
                     
             except Exception as e:
-                st.error(f"Research failed: {str(e)}")
+                st.error(f"Research failed: {type(e).__name__} - {str(e)}")
                 st.markdown("""
                 **Common Issues:**
                 - Ensure **`SERPER_API_KEY`** is set in Streamlit secrets
                 - Ensure **`GEMINI_API_KEY`** is set in Streamlit secrets (for live research)
-                - Check your API quotas
+                - Check your API quotas (run again if you see a RateLimitError)
                 """)
-
-# Research history
+# --- Research History (No Change) ---
 if st.session_state.research_history:
     st.sidebar.header("Research History")
     for i, research in enumerate(reversed(st.session_state.research_history)):
+        # Calculate the actual index (needed for the load key)
+        original_index = len(st.session_state.research_history) - 1 - i 
+        
         with st.sidebar.expander(f"**{research['company']}** - {research['timestamp'][:10]}", expanded=False):
             st.write(f"Intent Score: {research['data'].get('intent_scoring', 'N/A')}/10")
-            if st.button(f"Load {research['company']}", key=f"load_{i}"):
-                st.session_state.company_input_from_history = research['company'] 
+            if st.button(f"Load {research['company']}", key=f"load_{original_index}"):
+                # Set the input text box value and trigger rerun
+                st.session_state.company_input = research['company'] 
                 st.rerun()
 
-# Apply the history load logic
-if 'company_input_from_history' in st.session_state:
-    if st.session_state.company_input_from_history != company_input:
-        company_input = st.session_state.company_input_from_history
-        del st.session_state.company_input_from_history
-        st.rerun()
-
-
-# Instructions
+# --- Instructions (No Change) ---
 with st.sidebar.expander("Setup Instructions ⚙️"):
     st.markdown("""
-    This app uses **Gemini (free tier)** and **Serper Search** for research.
+    This app uses **Gemini 2.5 Flash-Lite (free tier)** and **Serper Search** for research.
 
     **You MUST set both keys in your Streamlit Cloud secrets:**
 
     1.  **Search Tool:**
-        - `SERPER_API_KEY`: Get from [serper.dev](https://serper.dev/) (provides $50 free credit).
+        - `SERPER_API_KEY`: Get from [serper.dev](https://serper.dev/).
     
     2.  **Language Model (LLM):**
-        - **`GEMINI_API_KEY`**: Get from [Google AI Studio](https://aistudio.google.com/app/apikey). This key provides a generous free tier for agent operations.
+        - **`GEMINI_API_KEY`**: Get from [Google AI Studio](https://aistudio.google.com/app/apikey).
 
-    **How it works (using Gemini 2.5 Flash):**
+    **How it works (using Gemini 2.5 Flash-Lite):**
     1.  **Research Specialist** uses SerperDevTool to find data with sources.
     2.  **Data Validator** verifies, enriches information, and assigns an Intent Score.
     3.  **Formatter** creates the structured Pydantic JSON output.
