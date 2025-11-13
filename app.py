@@ -2,9 +2,8 @@ import streamlit as st
 import pandas as pd
 from crewai import Agent, Task, Crew, Process
 from crewai_tools import SerperDevTool
-from langchain_google_genai import ChatGoogleGenerativeAI 
-# FIX: Changed import path from langchain.llms to langchain_community.llms
-from langchain_community.llms import FakeListLLM 
+# REMOVED: from langchain_google_genai import ChatGoogleGenerativeAI 
+from langchain_community.llms import FakeListLLM # KEEP: For mock data fallback
 from pydantic import BaseModel, Field
 import os
 import json
@@ -53,18 +52,13 @@ def get_llm():
     if GEMINI_API_KEY:
         st.info("Using Gemini 2.5 Flash for live research.")
         
-        # CrewAI/LiteLLM compatibility fix: 
-        # The key should be passed to the LangChain wrapper.
-        # The model name should be passed as standard.
-        return ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            temperature=0.2, 
-            google_api_key=GEMINI_API_KEY # Explicitly pass the API key here
-        )
+        # **CRITICAL FIX:** Return the model name in the LiteLLM format: provider/model
+        # LiteLLM automatically uses the GEMINI_API_KEY from the environment.
+        return "gemini/gemini-2.5-flash"
+        
     else:
         # Fallback to a mock LLM if key is missing
         st.warning("⚠️ WARNING: GEMINI_API_KEY not found. Using a mock LLM for demonstration (no actual research will occur).")
-        # ... (rest of the FakeListLLM initialization remains the same)
         responses = [json.dumps(CompanyData(
             linkedin_url="Mock: linkedin.com/company/mockco", 
             company_website_url="Mock: mockco.com", 
@@ -83,7 +77,8 @@ def get_llm():
             physical_infrastructure_signals="Mock: New HQ opening in London.", 
             it_infra_budget_capex="Mock: $10M Capex (2025)",
             why_relevant_to_syntel="Mock: Strong expansion and clear digital initiatives point to major IT infra needs.",
-            intent_scoring=8).dict())] * 10
+            intent_scoring=8
+        ).dict())] * 10
         return FakeListLLM(responses=responses)
 
 # Initialize LLM once
