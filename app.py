@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from crewai import Agent, Task, Crew, Process
 from crewai_tools import SerperDevTool
-from langchain.llms import Ollama
+from langchain_community.llms import Ollama
 from pydantic import BaseModel, Field
 import os
 import json
