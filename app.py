@@ -384,8 +384,7 @@ if submitted:
                             label="Download TSV Data",
                             data=tsv_data,
                             file_name=tsv_filename,
-                            mime="text/tab-separated-values"
-                        )
+                            mime="text/tab-separated-values")
                         
                     else:
                         st.warning("Could not parse structured data. Showing raw result:")
@@ -417,7 +416,7 @@ if st.session_state.research_history:
                 st.rerun()
 
 # --- Instructions ---
-with st.sidebar.expander("Setup Instructions "):
+with st.sidebar.expander("Setup Instructions ⚙️"):
     st.markdown("""
     This app uses **Gemini 2.5 Flash-Lite (free tier)** and **Serper Search** for research.
 
