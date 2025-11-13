@@ -1,8 +1,17 @@
+# Core CrewAI and Streamlit
 crewai
 crewai-tools
 streamlit
 pandas
 pydantic
+
+# LLM Handlers (LiteLLM handles the LLM connection)
+litellm 
+
+# Dependencies needed for the native Gemini connection (as per error message)
+# This is the package CrewAI is looking for.
+google-genai 
+
+# Fallback/Utility LangChain libraries
 langchain
 langchain-community
-litellm
