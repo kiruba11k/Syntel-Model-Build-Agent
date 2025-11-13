@@ -2,16 +2,16 @@ import streamlit as st
 import pandas as pd
 from crewai import Agent, Task, Crew, Process
 from crewai_tools import SerperDevTool
-# FIX 1: Use the correct package for the Gemini API
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.llms import FakeListLLM 
+from langchain_google_genai import ChatGoogleGenerativeAI 
+# FIX: Changed import path from langchain.llms to langchain_community.llms
+from langchain_community.llms import FakeListLLM 
 from pydantic import BaseModel, Field
 import os
 import json
 import time
 from datetime import datetime
 import re
-import sys 
+import sys
 
 # --- Configuration & Deployment Check ---
 # You MUST set both keys in Streamlit secrets
