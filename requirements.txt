@@ -1,14 +1,8 @@
-# Primary CrewAI dependencies
 crewai
 crewai-tools
 streamlit
 pandas
 pydantic
-
-# LangChain/LLM Dependencies
 langchain
 langchain-community
-langchain-google-genai 
-
-# FIX for the CrewAI/LiteLLM ImportError
 litellm
