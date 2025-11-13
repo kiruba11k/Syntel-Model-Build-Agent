@@ -55,7 +55,7 @@ def get_llm():
         
         # **CRITICAL FIX:** Return the model name in the LiteLLM format: provider/model
         # LiteLLM automatically uses the GEMINI_API_KEY from the environment.
-        return "groq/llama-3.3-70b-versatile"
+        return "groq/llama-3.1-8b-instant"
         
         
     else:
