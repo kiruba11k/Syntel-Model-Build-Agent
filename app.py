@@ -12,7 +12,7 @@ import re
 import sys
 
 # --- Configuration & Deployment Check ---
-# You MUST set both keys in Streamlit secrets
+# Get API keys from Streamlit secrets
 SERPER_API_KEY = st.secrets.get("SERPER_API_KEY")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
 
@@ -48,12 +48,12 @@ class CompanyData(BaseModel):
 
 # --- Helper Function for Custom Table Formatting ---
 def format_data_for_display(company_input: str, validated_data: CompanyData) -> pd.DataFrame:
-    """Transforms the Pydantic model into the specific 1-row table format required."""
+    """Transforms the Pydantic model into the specific 1-row table format requested by the user."""
     data_dict = validated_data.dict()
     
     # Define the exact output column names and map them to the Pydantic fields
     mapping = {
-        "Company Name": company_input, # Special case: use the input variable
+        "Company Name": "company_name_placeholder",
         "LinkedIn URL": "linkedin_url",
         "Company Website URL": "company_website_url",
         "Industry Category": "industry_category",
@@ -78,10 +78,8 @@ def format_data_for_display(company_input: str, validated_data: CompanyData) -> 
     row_data = {}
     for display_col, pydantic_field in mapping.items():
         if display_col == "Company Name":
-             # Use the company input directly
-            row_data[display_col] = pydantic_field 
+            row_data[display_col] = company_input 
         else:
-            # Get data from the Pydantic model dictionary
             row_data[display_col] = data_dict.get(pydantic_field, "N/A")
             
     # Convert the single dictionary entry into a DataFrame with one row
@@ -93,13 +91,11 @@ def format_data_for_display(company_input: str, validated_data: CompanyData) -> 
     return df
 
 
-# --- LLM Initialization (Uses LiteLLM and GEMINI_API_KEY from environment) ---
+# --- LLM Initialization ---
 def get_llm():
     if GEMINI_API_KEY:
-        # Tweak the info message to reflect the model you are using
         st.info("Using Gemini 2.5 Flash-Lite for high-throughput live research.") 
-        
-        # This is the stable, high-throughput model we agreed upon
+        # LiteLLM model string for the high-throughput free tier Gemini model
         return "gemini/gemini-2.5-flash-lite"
         
     else:
@@ -134,7 +130,7 @@ llm = get_llm()
 # --- Agents ---
 search_tool = SerperDevTool()
 
-# Agents remain the same
+# Agent definitions remain the same, using the initialized LLM
 research_specialist = Agent(
     role='Business Intelligence Research Specialist',
     goal="Conduct deep, targeted research to find specific business intelligence data with source URLs for all requested fields.",
@@ -162,10 +158,10 @@ formatter = Agent(
     verbose=True,
     allow_delegation=False,
     llm=llm,
-    output_json=CompanyData # This tells the agent to enforce the schema
+    output_json=CompanyData 
 )
 
-# --- Research Tasks (No Change) ---
+# --- Research Tasks ---
 def create_research_tasks(company_name):
     
     research_task = Task(
@@ -191,18 +187,19 @@ def create_research_tasks(company_name):
         expected_output="Validated dataset with quality scores and intent analysis"
     )
 
+    # UPDATED: Enforce stricter JSON output requirements to prevent ValidationError
     formatting_task = Task(
         description=f"""
         FORMAT FINAL OUTPUT FOR: {company_name}
         
-        Convert the validated research data into the exact JSON schema format.
+        Convert the validated research data into the exact JSON schema format defined by the Pydantic model.
         
         REQUIREMENTS:
-        - All 18 fields must be populated
-        - Intent scoring must be an integer (1-10)
-        - "Why Relevant to Syntel" must be specific and actionable
+        - **EVERY SINGLE FIELD MUST BE PRESENT IN THE FINAL JSON.** If a field's value is truly 'Not Found', you must explicitly set its value to "Not Found (No Source)".
+        - The output must start with '{{' and end with '}}' with nothing else.
+        - Intent scoring must be an integer (1-10).
         
-        Output must be valid JSON that can be parsed by the Pydantic model. **ONLY OUTPUT THE JSON STRING. DO NOT ADD ANY MARKDOWN OR EXPLANATORY TEXT.**
+        Output must be valid JSON that can be parsed by the Pydantic model. **ONLY OUTPUT THE JSON STRING. DO NOT ADD ANY MARKDOWN, EXPLANATORY TEXT, OR BACKTICKS (```).**
         """,
         agent=formatter,
         expected_output="Perfectly formatted JSON output matching the CompanyData schema"
@@ -217,7 +214,7 @@ st.set_page_config(
 )
 
 st.title("Syntel Company Data AI Agent")
-st.markdown("### Powered by CrewAI and Gemini/Serper Search ")
+st.markdown("### Powered by CrewAI and Gemini/Serper Search")
 
 # Initialize session state
 if 'research_history' not in st.session_state:
@@ -276,85 +273,119 @@ if submitted:
                 try:
                     result_text = str(result)
                     
-                    # Regex to find the JSON object. This is more robust than just slicing.
-                    json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
-                    if json_match:
-                        json_str = json_match.group()
-                        data = json.loads(json_str)
-                        # Validate the final JSON against the Pydantic schema
-                        validated_data = CompanyData(**data) 
+                    # NEW: More resilient JSON extraction logic
+                    cleaned_result = result_text.strip()
+                    if cleaned_result.startswith('```json'):
+                        cleaned_result = cleaned_result[7:]
+                    if cleaned_result.endswith('```'):
+                        cleaned_result = cleaned_result[:-3]
                         
-                        research_entry = {
-                            "company": company_input,
-                            "timestamp": datetime.now().isoformat(),
-                            "data": validated_data.dict()
-                        }
-                        st.session_state.research_history.append(research_entry)
+                    start_index = cleaned_result.index('{')
+                    end_index = cleaned_result.rindex('}') + 1
+                    json_str = cleaned_result[start_index:end_index]
+                    
+                    data = json.loads(json_str)
+                    
+                    # Validate the final JSON against the Pydantic schema
+                    validated_data = CompanyData(**data) 
+                    
+                    research_entry = {
+                        "company": company_input,
+                        "timestamp": datetime.now().isoformat(),
+                        "data": validated_data.dict()
+                    }
+                    st.session_state.research_history.append(research_entry)
+                    
+                    # --- Display Tabs ---
+                    tab1, tab2, tab3 = st.tabs(["📊 Final Report Table", "📋 Detailed View", "📈 Analysis Summary"])
+                    
+                    with tab1:
+                        st.subheader(f"Final Business Intelligence Report for {company_input}")
                         
-                        # --- Display Tabs ---
-                        tab1, tab2, tab3 = st.tabs(["📊 Final Report Table", "📋 Detailed View", "📈 Analysis Summary"])
+                        # Use the new formatting function to get the desired single-row table
+                        final_df = format_data_for_display(company_input, validated_data)
                         
-                        with tab1:
-                            st.subheader(f"Final Business Intelligence Report for {company_input}")
-                            
-                            # Use the new formatting function to get the desired single-row table
-                            final_df = format_data_for_display(company_input, validated_data)
-                            
-                            st.dataframe(final_df, use_container_width=True, height=200) 
-                            
-                            st.caption("The table can be scrolled horizontally to view all 19 columns.")
+                        st.dataframe(final_df, use_container_width=True, height=200) 
+                        
+                        st.caption("The table can be scrolled horizontally to view all columns.")
 
-                        with tab2:
-                            st.subheader("Detailed Research Results")
-                            data_dict = validated_data.dict()
-                            
-                            categories = {
-                                "Basic Company Info": [
-                                    "linkedin_url", "company_website_url", "industry_category",
-                                    "employee_count_linkedin", "headquarters_location", "revenue_source"
-                                ],
-                                "Core Business Intelligence": [
-                                    "branch_network_count", "expansion_news_12mo", "digital_transformation_initiatives",
-                                    "it_leadership_change", "existing_network_vendors", "wifi_lan_tender_found",
-                                    "iot_automation_edge_integration", "cloud_adoption_gcc_setup", 
-                                    "physical_infrastructure_signals", "it_infra_budget_capex"
-                                ],
-                                "Analysis & Scoring": [
-                                    "why_relevant_to_syntel", "intent_scoring"
-                                ]
-                            }
-                            
-                            for category, fields in categories.items():
-                                with st.expander(category, expanded=True):
-                                    for field in fields:
-                                        if field in data_dict:
-                                            st.markdown(f"**{field.replace('_', ' ').title()}:** {data_dict[field]}")
-                                            st.divider()
+                    with tab2:
+                        st.subheader("Detailed Research Results")
+                        data_dict = validated_data.dict()
                         
-                        with tab3:
-                            st.subheader("Business Intelligence Analysis")
-                            
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Intent Score", f"{validated_data.intent_scoring}/10")
-                            with col2:
-                                filled_fields = sum(1 for value in validated_data.dict().values() if value and str(value).strip() and "not found" not in str(value).lower() and "mock:" not in str(value).lower())
-                                total_fields = len(validated_data.dict())
-                                completeness = (filled_fields / total_fields) * 100
-                                st.metric("Data Completeness", f"{completeness:.1f}%")
-                            with col3:
-                                st.metric("Research Date", datetime.now().strftime("%Y-%m-%d"))
-                            
-                            st.subheader("Relevance to Syntel")
-                            st.info(validated_data.why_relevant_to_syntel)
-                            
-                            filename = f"{company_input.replace(' ', '_')}_data.json"
-                            st.download_button(
-                                label="Download JSON Data",
-                                data=json.dumps(validated_data.dict(), indent=2),
-                                file_name=filename,
-                                mime="application/json"
-                            )
+                        categories = {
+                            "Basic Company Info": [
+                                "linkedin_url", "company_website_url", "industry_category",
+                                "employee_count_linkedin", "headquarters_location", "revenue_source"
+                            ],
+                            "Core Business Intelligence": [
+                                "branch_network_count", "expansion_news_12mo", "digital_transformation_initiatives",
+                                "it_leadership_change", "existing_network_vendors", "wifi_lan_tender_found",
+                                "iot_automation_edge_integration", "cloud_adoption_gcc_setup", 
+                                "physical_infrastructure_signals", "it_infra_budget_capex"
+                            ],
+                            "Analysis & Scoring": [
+                                "why_relevant_to_syntel", "intent_scoring"
+                            ]
+                        }
+                        
+                        for category, fields in categories.items():
+                            with st.expander(category, expanded=True):
+                                for field in fields:
+                                    if field in data_dict:
+                                        st.markdown(f"**{field.replace('_', ' ').title()}:** {data_dict[field]}")
+                                        st.divider()
+                    
+                    with tab3:
+                        st.subheader("Business Intelligence Analysis")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Intent Score", f"{validated_data.intent_scoring}/10")
+                        with col2:
+                            filled_fields = sum(1 for value in validated_data.dict().values() if value and str(value).strip() and "not found" not in str(value).lower() and "mock:" not in str(value).lower())
+                            total_fields = len(validated_data.dict())
+                            completeness = (filled_fields / total_fields) * 100
+                            st.metric("Data Completeness", f"{completeness:.1f}%")
+                        with col3:
+                            st.metric("Research Date", datetime.now().strftime("%Y-%m-%d"))
+                        
+                        st.subheader("Relevance to Syntel")
+                        st.info(validated_data.why_relevant_to_syntel)
+                        
+                        st.subheader("Download Options")
+                        
+                        # Generate the final DataFrame again for download consistency
+                        final_df_download = format_data_for_display(company_input, validated_data)
+
+                        # 1. Download JSON
+                        json_filename = f"{company_input.replace(' ', '_')}_data.json"
+                        st.download_button(
+                            label="Download JSON Data",
+                            data=json.dumps(validated_data.dict(), indent=2),
+                            file_name=json_filename,
+                            mime="application/json"
+                        )
+
+                        # 2. Download CSV
+                        csv_data = final_df_download.to_csv(index=False).encode('utf-8')
+                        csv_filename = f"{company_input.replace(' ', '_')}_data.csv"
+                        st.download_button(
+                            label="Download CSV Data",
+                            data=csv_data,
+                            file_name=csv_filename,
+                            mime="text/csv"
+                        )
+
+                        # 3. Download TSV (Tab Separated Values)
+                        tsv_data = final_df_download.to_csv(index=False, sep='\t').encode('utf-8')
+                        tsv_filename = f"{company_input.replace(' ', '_')}_data.tsv"
+                        st.download_button(
+                            label="Download TSV Data",
+                            data=tsv_data,
+                            file_name=tsv_filename,
+                            mime="text/tab-separated-values"
+                        )
                         
                     else:
                         st.warning("Could not parse structured data. Showing raw result:")
@@ -362,7 +393,7 @@ if submitted:
                         
                 except Exception as e:
                     st.error(f"Error processing final results: {type(e).__name__} - {str(e)}")
-                    st.write("Raw result of the last task:")
+                    st.write("Raw result of the last task (Formatter):")
                     st.code(result)
                     
             except Exception as e:
@@ -373,22 +404,20 @@ if submitted:
                 - Ensure **`GEMINI_API_KEY`** is set in Streamlit secrets (for live research)
                 - Check your API quotas (run again if you see a RateLimitError)
                 """)
-# --- Research History (No Change) ---
+# --- Research History ---
 if st.session_state.research_history:
     st.sidebar.header("Research History")
     for i, research in enumerate(reversed(st.session_state.research_history)):
-        # Calculate the actual index (needed for the load key)
         original_index = len(st.session_state.research_history) - 1 - i 
         
         with st.sidebar.expander(f"**{research['company']}** - {research['timestamp'][:10]}", expanded=False):
             st.write(f"Intent Score: {research['data'].get('intent_scoring', 'N/A')}/10")
             if st.button(f"Load {research['company']}", key=f"load_{original_index}"):
-                # Set the input text box value and trigger rerun
                 st.session_state.company_input = research['company'] 
                 st.rerun()
 
-# --- Instructions (No Change) ---
-with st.sidebar.expander("Setup Instructions ⚙️"):
+# --- Instructions ---
+with st.sidebar.expander("Setup Instructions "):
     st.markdown("""
     This app uses **Gemini 2.5 Flash-Lite (free tier)** and **Serper Search** for research.
 
