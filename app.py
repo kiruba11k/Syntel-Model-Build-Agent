@@ -270,10 +270,11 @@ if submitted:
                 
                 st.success(f"Comprehensive research completed for **{company_input}**")
                 
+                # --- JSON Parsing Logic ---
                 try:
                     result_text = str(result)
                     
-                    # NEW: More resilient JSON extraction logic
+                    # 1. NEW: More resilient JSON extraction logic
                     cleaned_result = result_text.strip()
                     if cleaned_result.startswith('```json'):
                         cleaned_result = cleaned_result[7:]
@@ -286,7 +287,7 @@ if submitted:
                     
                     data = json.loads(json_str)
                     
-                    # Validate the final JSON against the Pydantic schema
+                    # 2. Validate the final JSON against the Pydantic schema
                     validated_data = CompanyData(**data) 
                     
                     research_entry = {
@@ -302,7 +303,7 @@ if submitted:
                     with tab1:
                         st.subheader(f"Final Business Intelligence Report for {company_input}")
                         
-                        # Use the new formatting function to get the desired single-row table
+                        # Use the formatting function to get the desired single-row table
                         final_df = format_data_for_display(company_input, validated_data)
                         
                         st.dataframe(final_df, use_container_width=True, height=200) 
@@ -355,7 +356,7 @@ if submitted:
                         
                         st.subheader("Download Options")
                         
-                        # Generate the final DataFrame again for download consistency
+                        # Generate the final DataFrame for download consistency
                         final_df_download = format_data_for_display(company_input, validated_data)
 
                         # 1. Download JSON
@@ -384,18 +385,17 @@ if submitted:
                             label="Download TSV Data",
                             data=tsv_data,
                             file_name=tsv_filename,
-                            mime="text/tab-separated-values")
+                            mime="text/tab-separated-values"
+                        )
                         
-                    else:
-                        st.warning("Could not parse structured data. Showing raw result:")
-                        st.code(result, language='json')
-                        
-                except Exception as e:
+                except (ValueError, json.JSONDecodeError, IndexError, KeyError) as e:
+                    # Catch the parsing and Pydantic validation errors
                     st.error(f"Error processing final results: {type(e).__name__} - {str(e)}")
                     st.write("Raw result of the last task (Formatter):")
                     st.code(result)
                     
             except Exception as e:
+                # Catch the core CrewAI kickoff errors
                 st.error(f"Research failed: {type(e).__name__} - {str(e)}")
                 st.markdown("""
                 **Common Issues:**
@@ -403,6 +403,7 @@ if submitted:
                 - Ensure **`GEMINI_API_KEY`** is set in Streamlit secrets (for live research)
                 - Check your API quotas (run again if you see a RateLimitError)
                 """)
+
 # --- Research History ---
 if st.session_state.research_history:
     st.sidebar.header("Research History")
