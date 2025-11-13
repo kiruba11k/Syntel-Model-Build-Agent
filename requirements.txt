@@ -8,4 +8,5 @@ requests
 duckduckgo-search
 langchain-groq
 langchain-community
+langchain-google-genai
 
