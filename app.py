@@ -87,7 +87,7 @@ formatter = Agent(
     Meticulous about data structure and field completion.""",
     verbose=True,
     allow_delegation=False,
-    llm=Groq(model_name="llama3-70b-8192")
+    llm=Groq(model_name="llama-3.3-70b-versatile")
 )
 
 # --- Enhanced Research Tasks ---
