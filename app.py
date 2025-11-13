@@ -14,8 +14,8 @@ import sys
 
 # --- Configuration & Deployment Check ---
 # You MUST set both keys in Streamlit secrets
-SERPER_API_KEY = st.secrets("SERPER_API_KEY")
-GEMINI_API_KEY = st.secrets("GEMINI_API_KEY") # NEW REQUIRED KEY
+SERPER_API_KEY = st.secrets.get("SERPER_API_KEY")
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") # NEW REQUIRED KEY
 
 if not SERPER_API_KEY:
     st.error("❌ ERROR: SERPER_API_KEY not found in Streamlit secrets. Please set it to enable search.")
