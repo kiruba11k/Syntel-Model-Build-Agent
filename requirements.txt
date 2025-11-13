@@ -1,12 +1,14 @@
-streamlit
+# Primary CrewAI dependencies
 crewai
 crewai-tools
-groq
-pydantic
+streamlit
 pandas
-requests
-duckduckgo-search
-langchain-groq
-langchain-community
-langchain-google-genai
+pydantic
 
+# LangChain/LLM Dependencies
+langchain
+langchain-community
+langchain-google-genai 
+
+# FIX for the CrewAI/LiteLLM ImportError
+litellm
