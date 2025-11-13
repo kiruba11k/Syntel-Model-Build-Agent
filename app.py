@@ -14,8 +14,8 @@ import sys
 
 # --- Configuration & Deployment Check ---
 # You MUST set both keys in Streamlit secrets
-SERPER_API_KEY = os.environ.get("SERPER_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # NEW REQUIRED KEY
+SERPER_API_KEY = st.secrets("SERPER_API_KEY")
+GEMINI_API_KEY = st.secrets("GEMINI_API_KEY") # NEW REQUIRED KEY
 
 if not SERPER_API_KEY:
     st.error("❌ ERROR: SERPER_API_KEY not found in Streamlit secrets. Please set it to enable search.")
@@ -55,6 +55,7 @@ def get_llm():
         # **CRITICAL FIX:** Return the model name in the LiteLLM format: provider/model
         # LiteLLM automatically uses the GEMINI_API_KEY from the environment.
         return "gemini/gemini-2.5-flash"
+        
         
     else:
         # Fallback to a mock LLM if key is missing
