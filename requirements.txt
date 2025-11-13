@@ -1,7 +1,8 @@
 streamlit
+crewai
+crewai-tools
+groq
+pydantic
 pandas
 requests
-beautifulsoup4
-lxml
-plotly
-duckduckgo_search
+duckduckgo-search
