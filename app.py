@@ -1,306 +1,379 @@
-# enhanced_bi_agent.py
 import streamlit as st
 import pandas as pd
-import requests
-import re
+from crewai import Agent, Task, Crew, Process
+from crewai_tools import SerperDevTool
+from groq import Groq
+from pydantic import BaseModel, Field
+import os
+import json
 import time
 from datetime import datetime
-from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
-import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- Configuration & Secrets ---
+# Set these in Streamlit Cloud secrets: SERPER_API_KEY, GROQ_API_KEY
 
-class EnhancedBIAgent:
-    def __init__(self):
-        self.ddgs = DDGS()
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+# --- Enhanced Output Schema ---
+class CompanyData(BaseModel):
+    # Basic Company Info
+    linkedin_url: str = Field(description="LinkedIn URL and source/confidence.")
+    company_website_url: str = Field(description="Official company website URL and source/confidence.")
+    industry_category: str = Field(description="Industry category and source.")
+    employee_count_linkedin: str = Field(description="Employee count range and source.")
+    headquarters_location: str = Field(description="Headquarters city, country, and source.")
+    revenue_source: str = Field(description="Revenue data point and specific source (ZoomInfo/Owler/Apollo/News).")
     
-    def multi_source_search(self, company_name, queries, max_results=5):
-        """Search using multiple approaches with fallback"""
-        all_results = []
-        
-        for query in queries:
-            try:
-                # Try DuckDuckGo first
-                results = list(self.ddgs.text(
-                    keywords=f"{company_name} {query}",
-                    region="wt-wt",
-                    safesearch="off",
-                    max_results=max_results
-                ))
-                
-                for result in results:
-                    result['search_query'] = query
-                    all_results.append(result)
-                
-                time.sleep(1)  # Be respectful to the service
-                
-            except Exception as e:
-                logger.error(f"Search failed for {query}: {str(e)}")
-                continue
-        
-        return all_results
+    # Core Research Fields (Your main columns)
+    branch_network_count: str = Field(description="Number of branches/facilities mentioned online and source.")
+    expansion_news_12mo: str = Field(description="Summary of expansion news in the last 12 months and source link.")
+    digital_transformation_initiatives: str = Field(description="Details on smart infra or digital programs and source link.")
+    it_leadership_change: str = Field(description="Name and title of new CIO/CTO/Head of Infra if changed recently and source link.")
+    existing_network_vendors: str = Field(description="Mentioned network vendors or tech stack and source.")
+    wifi_lan_tender_found: str = Field(description="Yes/No and source link if a tender was found.")
+    iot_automation_edge_integration: str = Field(description="Details on IoT/Automation/Edge mentions and source link.")
+    cloud_adoption_gcc_setup: str = Field(description="Details on Cloud Adoption or Global Capability Centers (GCC) and source link.")
+    physical_infrastructure_signals: str = Field(description="Any physical infra signals (new office, factory etc) and source link.")
+    it_infra_budget_capex: str = Field(description="IT Infra Budget or Capex allocation details and source.")
     
-    def extract_financial_signals(self, company_name):
-        """Enhanced financial and infrastructure data extraction"""
-        queries = [
-            "IT budget 2024 2025",
-            "capital expenditure capex infrastructure",
-            "technology investment plan",
-            "digital transformation budget",
-            "IT infrastructure spending"
-        ]
-        
-        results = self.multi_source_search(company_name, queries)
-        
-        financial_data = {
-            "IT Infra Budget / Capex Allocation": {"value": "", "source": ""},
-            "Physical Infrastructure Signals": {"value": "", "source": ""}
-        }
-        
-        budget_patterns = [
-            r'(\$?\d+(?:\.\d+)?\s*(?:million|billion|cr|crore|M|B))',
-            r'budget.*?\$?\d+',
-            r'capex.*?\$?\d+',
-            r'invest.*?\$?\d+\s*(?:million|billion)'
-        ]
-        
-        infrastructure_patterns = [
-            r'data center|server room|facility expansion|new building|office expansion',
-            r'cloud infrastructure|server upgrade|network upgrade',
-            r'warehouse|logistics center|distribution facility'
-        ]
-        
-        for result in results:
-            content = f"{result.get('title', '')} {result.get('body', '')}".lower()
-            url = result.get('href', '')
-            
-            # Extract budget information
-            if not financial_data["IT Infra Budget / Capex Allocation"]["value"]:
-                for pattern in budget_patterns:
-                    matches = re.findall(pattern, content, re.IGNORECASE)
-                    if matches:
-                        financial_data["IT Infra Budget / Capex Allocation"] = {
-                            "value": f"Found financial signals: {', '.join(matches[:2])}",
-                            "source": url
-                        }
-                        break
-            
-            # Extract infrastructure signals
-            if not financial_data["Physical Infrastructure Signals"]["value"]:
-                for pattern in infrastructure_patterns:
-                    if re.search(pattern, content):
-                        financial_data["Physical Infrastructure Signals"] = {
-                            "value": f"Infrastructure development mentioned: {result.get('title', 'Infrastructure projects')}",
-                            "source": url
-                        }
-                        break
-        
-        return financial_data
+    # Analysis Fields
+    why_relevant_to_syntel: str = Field(description="Why this company is a relevant lead for Syntel (based on all data).")
+    intent_scoring: int = Field(description="Intent score 1-10 based on buying signals detected.")
+
+# --- Enhanced Agents ---
+
+# Research Specialist Agent - Focused on finding specific data
+research_specialist = Agent(
+    role='Business Intelligence Research Specialist',
+    goal="""
+    Conduct deep, targeted research to find specific business intelligence data for {company_name}.
+    Your primary focus is finding verifiable information for ALL requested fields with source URLs.
+    Never leave any field empty - if information is not available, state "Not found in research" with reasoning.
+    """,
+    backstory="""Expert in business intelligence with 15+ years experience finding hard-to-locate corporate data.
+    Specializes in identifying expansion news, IT infrastructure changes, and digital transformation initiatives.
+    Known for meticulous source verification and comprehensive data collection.""",
+    tools=[SerperDevTool()],
+    verbose=True,
+    allow_delegation=False,
+    llm=Groq(model_name="llama3-70b-8192")
+)
+
+# Data Validation & Enrichment Agent
+data_validator = Agent(
+    role='Data Quality & Enrichment Specialist',
+    goal="""
+    Review and enrich the research data. Ensure ALL fields have meaningful data with proper sources.
+    Cross-verify information from multiple sources when possible.
+    Calculate accurate intent scoring based on concrete business signals found.
+    """,
+    backstory="""Data quality expert with background in business analytics and market intelligence.
+    Excellent at identifying weak data points and finding additional sources to strengthen research.
+    Specializes in intent signal detection and relevance analysis.""",
+    tools=[SerperDevTool()],
+    verbose=True,
+    allow_delegation=False,
+    llm=Groq(model_name="llama3-70b-8192")
+)
+
+# Formatting & Output Agent
+formatter = Agent(
+    role='Data Formatting & Schema Specialist',
+    goal=f"""
+    Format the validated research data into the exact JSON schema: {CompanyData.schema_json()}.
+    Ensure every single field is populated with appropriate data and source citations.
+    Maintain strict adherence to the Pydantic schema structure.
+    """,
+    backstory="""Technical data specialist with expertise in data formatting and schema compliance.
+    Ensures all output meets specified standards and is ready for downstream processing.
+    Meticulous about data structure and field completion.""",
+    verbose=True,
+    allow_delegation=False,
+    llm=Groq(model_name="llama3-70b-8192")
+)
+
+# --- Enhanced Research Tasks ---
+def create_research_tasks(company_name):
+    """Create comprehensive research tasks"""
     
-    def extract_technology_stack(self, company_name):
-        """Enhanced technology stack research"""
-        queries = [
-            "technology stack IT infrastructure",
-            "network vendors Cisco Juniper Aruba",
-            "Wi-Fi upgrade LAN network",
-            "cloud migration AWS Azure Google Cloud",
-            "digital transformation tech stack"
-        ]
+    research_task = Task(
+        description=f"""
+        CONDUCT COMPREHENSIVE RESEARCH FOR: {company_name}
         
-        results = self.multi_source_search(company_name, queries)
+        RESEARCH ALL THESE FIELDS WITH SOURCE LINKS:
         
-        tech_data = {
-            "Existing Network Vendors / Tech Stack": {"value": "", "source": ""},
-            "Recent Wi-Fi Upgrade or LAN Tender Found": {"value": "", "source": ""},
-            "Cloud Adoption / GCC Setup": {"value": "", "source": ""},
-            "IoT / Automation / Edge Integration Mentioned": {"value": "", "source": ""}
-        }
+        1. BASIC COMPANY INFO:
+           - LinkedIn URL (find official company page)
+           - Company Website URL (official domain)
+           - Industry Category (primary business sector)
+           - Employee Count (from LinkedIn or similar)
+           - Headquarters Location (city, country)
+           - Revenue Information (from ZoomInfo/Owler/Apollo or financial reports)
         
-        vendor_keywords = ['cisco', 'juniper', 'aruba', 'hp', 'dell', 'vmware', 'microsoft']
-        cloud_keywords = ['aws', 'azure', 'google cloud', 'gcp', 'cloud migration', 'saaS']
-        iot_keywords = ['iot', 'internet of things', 'automation', 'edge computing', 'sensors']
-        upgrade_keywords = ['upgrade', 'tender', 'RFP', 'request for proposal', 'modernization']
+        2. CORE BUSINESS INTELLIGENCE (YOUR MAIN FOCUS):
+           - Branch Network / Facilities Count (number of offices/warehouses/branches)
+           - Expansion News Last 12 Months (new facilities, branches, geographic expansion)
+           - Digital Transformation Initiatives (smart infrastructure, IT modernization programs)
+           - IT Infrastructure Leadership Changes (new CIO/CTO/Head of Infrastructure appointments)
+           - Existing Network Vendors / Tech Stack (Cisco, Juniper, Aruba, VMware, etc.)
+           - Recent Wi-Fi Upgrade or LAN Tender Found (look for tender notices, upgrade announcements)
+           - IoT / Automation / Edge Integration (smart factory, automation projects, edge computing)
+           - Cloud Adoption / GCC Setup (AWS, Azure, Google Cloud adoption; Global Capability Centers)
+           - Physical Infrastructure Signals (new data centers, office expansions, facility upgrades)
+           - IT Infra Budget / Capex Allocation (IT spending, infrastructure investment plans)
         
-        for result in results:
-            content = f"{result.get('title', '')} {result.get('body', '')}".lower()
-            url = result.get('href', '')
-            
-            # Extract vendors
-            if not tech_data["Existing Network Vendors / Tech Stack"]["value"]:
-                found_vendors = [v for v in vendor_keywords if v in content]
-                if found_vendors:
-                    tech_data["Existing Network Vendors / Tech Stack"] = {
-                        "value": f"Technologies mentioned: {', '.join(found_vendors)}",
-                        "source": url
-                    }
-            
-            # Extract cloud adoption
-            if not tech_data["Cloud Adoption / GCC Setup"]["value"]:
-                found_cloud = [c for c in cloud_keywords if c in content]
-                if found_cloud:
-                    tech_data["Cloud Adoption / GCC Setup"] = {
-                        "value": f"Cloud services mentioned: {', '.join(found_cloud)}",
-                        "source": url
-                    }
-            
-            # Extract IoT/Automation
-            if not tech_data["IoT / Automation / Edge Integration Mentioned"]["value"]:
-                found_iot = [i for i in iot_keywords if i in content]
-                if found_iot:
-                    tech_data["IoT / Automation / Edge Integration Mentioned"] = {
-                        "value": f"Emerging tech mentioned: {', '.join(found_iot)}",
-                        "source": url
-                    }
-            
-            # Extract upgrades
-            if not tech_data["Recent Wi-Fi Upgrade or LAN Tender Found"]["value"]:
-                found_upgrades = [u for u in upgrade_keywords if u in content and any(n in content for n in ['network', 'wi-fi', 'lan', 'it'])]
-                if found_upgrades:
-                    tech_data["Recent Wi-Fi Upgrade or LAN Tender Found"] = {
-                        "value": f"Upgrade activity: {result.get('title', 'Network improvements')}",
-                        "source": url
-                    }
+        RESEARCH STRATEGY:
+        - Use multiple search queries for each field
+        - Look for recent information (2023-2025)
+        - Prioritize official sources: company websites, LinkedIn, press releases
+        - Include news articles, industry reports, tender portals
+        - NEVER SKIP ANY FIELD - if data is unavailable, explain why and what was searched
         
-        return tech_data
+        CRITICAL: Provide source URLs for every piece of information found.
+        """,
+        agent=research_specialist,
+        expected_output="Comprehensive research notes with data for all fields and source URLs"
+    )
+
+    validation_task = Task(
+        description=f"""
+        VALIDATE AND ENRICH RESEARCH DATA FOR: {company_name}
+        
+        REVIEW THE RESEARCHER'S FINDINGS AND:
+        1. Verify source credibility and data accuracy
+        2. Cross-check important findings with additional searches
+        3. Identify any missing or weak data points and find better sources
+        4. Calculate Intent Scoring (1-10) based on:
+           - Expansion activities found
+           - IT infrastructure projects
+           - Digital transformation initiatives
+           - Leadership changes
+           - Budget allocations
+        5. Analyze "Why Relevant to Syntel" based on concrete business signals
+        
+        ENSURE DATA COMPLETION:
+        - No field should be empty
+        - All sources must be verifiable URLs
+        - Intent scoring must be justified by specific findings
+        
+        FINAL OUTPUT: Validated, enriched dataset ready for formatting.
+        """,
+        agent=data_validator,
+        expected_output="Validated dataset with quality scores and intent analysis"
+    )
+
+    formatting_task = Task(
+        description=f"""
+        FORMAT FINAL OUTPUT FOR: {company_name}
+        
+        Convert the validated research data into the exact JSON schema format.
+        
+        REQUIREMENTS:
+        - All 18 fields must be populated
+        - Source URLs must be included where specified
+        - Data types must match schema requirements
+        - Intent scoring (1-10 integer) must reflect research findings
+        - "Why Relevant to Syntel" must be specific and actionable
+        
+        SCHEMA: {CompanyData.schema_json()}
+        
+        Output must be valid JSON that can be parsed by the Pydantic model.
+        """,
+        agent=formatter,
+        expected_output="Perfectly formatted JSON output matching the CompanyData schema",
+        output_file=f"{company_name.replace(' ', '_')}_data.json"
+    )
     
-    def research_company(self, company_name):
-        """Comprehensive company research"""
-        st.info(f"🔍 Starting enhanced research for {company_name}...")
-        
-        # Initialize all required fields
-        results = {
-            "Company Name": {"value": company_name, "source": "User Input"},
-            "Core intent": {"value": "Business Intelligence Research", "source": "Default"},
-            "Stage": {"value": "Active Research", "source": "Default"},
-            "Branch Network / Facilities Count": {"value": "Researching...", "source": ""},
-            "Expansion News (Last 12 Months)": {"value": "Researching...", "source": ""},
-            "Digital Transformation Initiatives / Smart Infra Programs": {"value": "Researching...", "source": ""},
-            "IT Infrastructure Leadership Change (CIO / CTO / Head Infra)": {"value": "Researching...", "source": ""},
-            "Existing Network Vendors / Tech Stack": {"value": "Researching...", "source": ""},
-            "Recent Wi-Fi Upgrade or LAN Tender Found": {"value": "Researching...", "source": ""},
-            "IoT / Automation / Edge Integration Mentioned": {"value": "Researching...", "source": ""},
-            "Cloud Adoption / GCC Setup": {"value": "Researching...", "source": ""},
-            "Physical Infrastructure Signals": {"value": "Researching...", "source": ""},
-            "IT Infra Budget / Capex Allocation": {"value": "Researching...", "source": ""},
-            "Why Relevant to Syntel": {"value": "Researching...", "source": ""},
-            "Intent scoring": {"value": "Researching...", "source": ""}
-        }
-        
-        # Execute research phases
-        research_phases = [
-            ("💻 Technology Stack", self.extract_technology_stack),
-            ("💰 Financial Analysis", self.extract_financial_signals)
-        ]
-        
+    return [research_task, validation_task, formatting_task]
+
+# --- Enhanced Streamlit UI ---
+st.set_page_config(
+    page_title="Syntel Business Intelligence Agent", 
+    page_icon="🏢",
+    layout="wide"
+)
+
+st.title("🏢 Syntel Company Data AI Agent")
+st.markdown("### Powered by CrewAI + Groq + Serper Search")
+
+# Initialize session state
+if 'research_history' not in st.session_state:
+    st.session_state.research_history = []
+
+# Input section
+col1, col2 = st.columns([2, 1])
+with col1:
+    company_input = st.text_input("Enter the company name to research:", "Wipro")
+with col2:
+    st.write("")
+    st.write("")
+    research_button = st.button("🚀 Start Deep Research", type="primary")
+
+if research_button:
+    if not company_input:
+        st.warning("Please enter a company name.")
+    else:
+        # Display research progress
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        for i, (phase_name, research_func) in enumerate(research_phases):
-            status_text.markdown(f'<div class="research-phase">Researching {phase_name}...</div>', unsafe_allow_html=True)
+        with st.spinner("AI Agents are conducting deep research... This may take 2-3 minutes."):
             try:
-                phase_results = research_func(company_name)
-                results.update(phase_results)
-                progress_bar.progress((i + 1) / len(research_phases))
-                time.sleep(2)
+                # Update progress
+                status_text.info("🔍 Phase 1/3: Initial research started...")
+                progress_bar.progress(20)
+                
+                # Create tasks and crew
+                tasks = create_research_tasks(company_input)
+                project_crew = Crew(
+                    agents=[research_specialist, data_validator, formatter],
+                    tasks=tasks,
+                    process=Process.sequential,
+                    verbose=True
+                )
+                
+                # Execute research
+                status_text.info("🔍 Phase 2/3: Data validation and enrichment...")
+                progress_bar.progress(50)
+                
+                result = project_crew.kickoff()
+                
+                status_text.info("🔍 Phase 3/3: Final formatting...")
+                progress_bar.progress(80)
+                
+                # Wait for file to be created
+                time.sleep(3)
+                
+                progress_bar.progress(100)
+                status_text.success("✅ Research Complete!")
+                
+                # Display results
+                filename = f"{company_input.replace(' ', '_')}_data.json"
+                if os.path.exists(filename):
+                    with open(filename, 'r') as f:
+                        try:
+                            data = json.load(f)
+                            
+                            # Validate with Pydantic
+                            validated_data = CompanyData(**data)
+                            
+                            # Store in session state
+                            research_entry = {
+                                "company": company_input,
+                                "timestamp": datetime.now().isoformat(),
+                                "data": validated_data.dict()
+                            }
+                            st.session_state.research_history.append(research_entry)
+                            
+                            # Display in nice format
+                            st.success(f"✅ Comprehensive research completed for {company_input}")
+                            
+                            # Create tabs for different views
+                            tab1, tab2, tab3 = st.tabs(["📊 Data Table", "🔍 Detailed View", "📈 Analysis"])
+                            
+                            with tab1:
+                                # Convert to DataFrame for nice display
+                                display_data = []
+                                for field, value in validated_data.dict().items():
+                                    display_data.append({
+                                        "Field": field.replace("_", " ").title(),
+                                        "Value": str(value)[:200] + "..." if len(str(value)) > 200 else str(value),
+                                        "Full Value": value
+                                    })
+                                
+                                df = pd.DataFrame(display_data)
+                                st.dataframe(df[["Field", "Value"]], use_container_width=True, hide_index=True)
+                            
+                            with tab2:
+                                # Detailed view with source links
+                                st.subheader("🔍 Detailed Research Results")
+                                data_dict = validated_data.dict()
+                                
+                                categories = {
+                                    "🏢 Basic Company Info": [
+                                        "linkedin_url", "company_website_url", "industry_category",
+                                        "employee_count_linkedin", "headquarters_location", "revenue_source"
+                                    ],
+                                    "📈 Core Business Intelligence": [
+                                        "branch_network_count", "expansion_news_12mo", "digital_transformation_initiatives",
+                                        "it_leadership_change", "existing_network_vendors", "wifi_lan_tender_found",
+                                        "iot_automation_edge_integration", "cloud_adoption_gcc_setup", 
+                                        "physical_infrastructure_signals", "it_infra_budget_capex"
+                                    ],
+                                    "🎯 Analysis & Scoring": [
+                                        "why_relevant_to_syntel", "intent_scoring"
+                                    ]
+                                }
+                                
+                                for category, fields in categories.items():
+                                    with st.expander(category, expanded=True):
+                                        for field in fields:
+                                            if field in data_dict:
+                                                col1, col2 = st.columns([3, 1])
+                                                with col1:
+                                                    st.markdown(f"**{field.replace('_', ' ').title()}**")
+                                                    st.write(data_dict[field])
+                                                with col2:
+                                                    # Check if value contains URL and make it clickable
+                                                    if isinstance(data_dict[field], str) and 'http' in data_dict[field]:
+                                                        urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', data_dict[field])
+                                                        for url in urls[:2]:  # Show first 2 URLs
+                                                            st.markdown(f'[🔗 Source]({url})')
+                                                st.divider()
+                            
+                            with tab3:
+                                # Analysis tab
+                                st.subheader("📈 Business Intelligence Analysis")
+                                
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("Intent Score", f"{validated_data.intent_scoring}/10")
+                                with col2:
+                                    # Calculate data completeness
+                                    filled_fields = sum(1 for value in validated_data.dict().values() if value and str(value).strip() and "not found" not in str(value).lower())
+                                    total_fields = len(validated_data.dict())
+                                    completeness = (filled_fields / total_fields) * 100
+                                    st.metric("Data Completeness", f"{completeness:.1f}%")
+                                with col3:
+                                    st.metric("Research Date", datetime.now().strftime("%Y-%m-%d"))
+                                
+                                # Relevance analysis
+                                st.subheader("🎯 Relevance to Syntel")
+                                st.info(validated_data.why_relevant_to_syntel)
+                                
+                                # Download button
+                                st.download_button(
+                                    label="📥 Download JSON Data",
+                                    data=json.dumps(validated_data.dict(), indent=2),
+                                    file_name=filename,
+                                    mime="application/json"
+                                )
+                            
+                        except Exception as e:
+                            st.error(f"Error parsing results: {str(e)}")
+                            st.json(data)  # Show raw JSON if parsing fails
+                else:
+                    st.error("Research completed but output file not found. Check the logs for details.")
+                    
             except Exception as e:
-                st.error(f"Error in {phase_name}: {str(e)}")
-        
-        # Calculate final scoring
-        filled_fields = sum(1 for key in results if results[key]["value"] and "Researching" not in results[key]["value"])
-        total_fields = len(results)
-        completion_rate = (filled_fields / total_fields) * 100
-        
-        # Determine intent scoring
-        if completion_rate > 70:
-            intent_score = "High"
-        elif completion_rate > 40:
-            intent_score = "Medium"
-        else:
-            intent_score = "Low"
-        
-        results["Intent scoring"] = {"value": intent_score, "source": "Algorithm"}
-        results["Why Relevant to Syntel"] = {
-            "value": f"Found {filled_fields} of {total_fields} data points with {intent_score} intent signals",
-            "source": "Analysis"
-        }
-        
-        return results
+                st.error(f"Research failed: {str(e)}")
+                st.markdown("""
+                **Common Issues:**
+                - Ensure GROQ_API_KEY and SERPER_API_KEY are set in Streamlit secrets
+                - Check your API quotas
+                - Try a different company name
+                """)
 
-# Streamlit UI Implementation
-def main():
-    st.set_page_config(page_title="Enhanced BI Research Agent", layout="wide")
-    
-    st.title("🏢 Enhanced Business Intelligence Agent")
-    st.markdown("### Multi-Source Research with DuckDuckGo")
-    
-    # Initialize session state
-    if 'enhanced_research' not in st.session_state:
-        st.session_state.enhanced_research = []
-    
-    company_input = st.text_input("Enter Company Name:", placeholder="e.g., Infosys, Tata Consultancy")
-    
-    if st.button("🚀 Start Enhanced Research"):
-        if company_input:
-            agent = EnhancedBIAgent()
-            
-            with st.status("🔍 Conducting Multi-Source Research...", expanded=True) as status:
-                results = agent.research_company(company_input)
-                status.update(label="Research Complete!", state="complete")
-            
-            # Display results
-            st.success(f"✅ Enhanced research completed for {company_input}")
-            
-            # Create results dataframe
-            display_data = []
-            for key, value_dict in results.items():
-                display_data.append({
-                    "Column": key,
-                    "Value": value_dict.get("value", "Not found"),
-                    "Source": value_dict.get("source", "Not available")
-                })
-            
-            df = pd.DataFrame(display_data)
-            
-            # Show completion metrics
-            col1, col2, col3 = st.columns(3)
-            filled_count = sum(1 for row in display_data if row["Value"] and "Researching" not in row["Value"])
-            
-            with col1:
-                st.metric("Total Fields", len(display_data))
-            with col2:
-                st.metric("Fields Filled", filled_count)
-            with col3:
-                st.metric("Completion Rate", f"{(filled_count/len(display_data))*100:.1f}%")
-            
-            # Display results in expandable sections
-            for category in ["Technology", "Financial", "Infrastructure"]:
-                with st.expander(f"{category} Intelligence", expanded=True):
-                    category_data = [row for row in display_data if category.lower() in row["Column"].lower()]
-                    if category_data:
-                        for row in category_data:
-                            col1, col2 = st.columns([3, 1])
-                            with col1:
-                                st.write(f"**{row['Column']}**")
-                                st.write(row['Value'])
-                            with col2:
-                                if row['Source'] and row['Source'] not in ['User Input', 'Default', 'Analysis', 'Algorithm']:
-                                    st.markdown(f'[Source]({row["Source"]})')
-                    else:
-                        st.write(f"No {category} data found")
-            
-            # Store results
-            st.session_state.enhanced_research.append({
-                "company": company_input,
-                "timestamp": datetime.now().isoformat(),
-                "data": results
-            })
+# Research history
+if st.session_state.research_history:
+    st.sidebar.header("📚 Research History")
+    for i, research in enumerate(reversed(st.session_state.research_history)):
+        with st.sidebar.expander(f"{research['company']} - {research['timestamp'][:10]}", expanded=False):
+            st.write(f"Intent Score: {research['data'].get('intent_scoring', 'N/A')}/10")
+            if st.button(f"Load {research['company']}", key=f"load_{i}"):
+                st.session_state.current_company = research['company']
+                st.rerun()
 
-if __name__ == "__main__":
-    main()
+# Instructions
+with st.sidebar.expander("📖 Setup Instructions"):
+    st.markdown("""
+   
+    """)
