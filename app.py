@@ -20,7 +20,7 @@ if not SERPER_API_KEY:
     st.error("❌ ERROR: SERPER_API_KEY not found in Streamlit secrets. Please set it to enable search.")
     st.stop()
 
-# --- Output Schema ---
+# --- Output Schema (Must match the required columns) ---
 class CompanyData(BaseModel):
     # Basic Company Info
     linkedin_url: str = Field(description="LinkedIn URL and source/confidence.")
@@ -44,7 +44,9 @@ class CompanyData(BaseModel):
     
     # Analysis Fields
     why_relevant_to_syntel: str = Field(description="Why this company is a relevant lead for Syntel (based on all data).")
-    intent_scoring: int = Field(description="Intent score 1-10 based on buying signals detected.")
+    # Intent Scoring: Since the Pydantic schema requires 'int', the LLM MUST output an integer (e.g., 0 if data is not found)
+    # The conflicting instruction "Not Found (No Source)" for an integer field is now handled in the task description to prioritize the integer type.
+    intent_scoring: int = Field(description="Intent score 1-10 based on buying signals detected.") 
 
 # --- Helper Function for Custom Table Formatting ---
 def format_data_for_display(company_input: str, validated_data: CompanyData) -> pd.DataFrame:
@@ -53,7 +55,7 @@ def format_data_for_display(company_input: str, validated_data: CompanyData) -> 
     
     # Define the exact output column names and map them to the Pydantic fields
     mapping = {
-        "Company Name": "company_name_placeholder",
+        "Company Name": "company_name_placeholder", # Placeholder for direct input
         "LinkedIn URL": "linkedin_url",
         "Company Website URL": "company_website_url",
         "Industry Category": "industry_category",
@@ -80,7 +82,11 @@ def format_data_for_display(company_input: str, validated_data: CompanyData) -> 
         if display_col == "Company Name":
             row_data[display_col] = company_input 
         else:
-            row_data[display_col] = data_dict.get(pydantic_field, "N/A")
+            # Handle the Intent Score specifically to ensure it's a string for display consistency
+            if pydantic_field == "intent_scoring":
+                 row_data[display_col] = str(data_dict.get(pydantic_field, "N/A"))
+            else:
+                 row_data[display_col] = data_dict.get(pydantic_field, "N/A")
             
     # Convert the single dictionary entry into a DataFrame with one row
     df = pd.DataFrame([row_data])
@@ -95,15 +101,13 @@ def format_data_for_display(company_input: str, validated_data: CompanyData) -> 
 def get_llm():
     if GEMINI_API_KEY:
         st.info("Using Gemini 2.5 Flash-Lite for high-throughput live research.") 
-        # LiteLLM model string for the high-throughput free tier Gemini model
         return "gemini/gemini-2.5-flash-lite"
         
     else:
-        # Fallback to a mock LLM if key is missing
         st.warning("⚠️ WARNING: GEMINI_API_KEY not found. Using a mock LLM for demonstration (no actual research will occur).")
         # Ensure the mock data conforms to the schema exactly
         responses = [json.dumps(CompanyData(
-            linkedin_url="Mock: linkedin.com/company/mockco", 
+            linkedin_url="Mock: [linkedin.com/company/mockco](https://linkedin.com/company/mockco)", 
             company_website_url="Mock: mockco.com", 
             industry_category="Mock: Technology",
             employee_count_linkedin="Mock: 10,000+", 
@@ -120,7 +124,7 @@ def get_llm():
             physical_infrastructure_signals="Mock: New HQ opening in London.", 
             it_infra_budget_capex="Mock: $10M Capex (2025)",
             why_relevant_to_syntel="Mock: Strong expansion and clear digital initiatives point to major IT infra needs.",
-            intent_scoring=8
+            intent_scoring=8 # Must be an integer for the mock
         ).dict())] * 10
         return FakeListLLM(responses=responses)
 
@@ -130,7 +134,6 @@ llm = get_llm()
 # --- Agents ---
 search_tool = SerperDevTool()
 
-# Agent definitions remain the same, using the initialized LLM
 research_specialist = Agent(
     role='Business Intelligence Research Specialist',
     goal="Conduct deep, targeted research to find specific business intelligence data with source URLs for all requested fields.",
@@ -169,7 +172,7 @@ def create_research_tasks(company_name):
         CONDUCT COMPREHENSIVE RESEARCH FOR: {company_name}
         --
         Your task is to find a single, definitive data point and source URL for every field listed in the schema.
-        CRITICAL: Provide source URLs for every piece of information found. If information cannot be found, state 'Not Found' and the search terms used.
+        CRITICAL: Provide source URLs for every piece of information found. If information cannot be found, state 'Not Found (No Source)' and the search terms used.
         """,
         agent=research_specialist,
         expected_output="Comprehensive research notes with data for all fields and source URLs"
@@ -179,15 +182,15 @@ def create_research_tasks(company_name):
         description=f"""
         VALIDATE AND ENRICH RESEARCH DATA FOR: {company_name}
         --
-        Review the research notes and ensure every field is populated or clearly marked 'Not Found'.
-        Calculate a final 'Intent Scoring' (1-10) based on all the buying signals detected (Expansion, Infra Budget, IT Leadership Change, IoT adoption, etc.).
+        Review the research notes and ensure every field is populated or clearly marked 'Not Found (No Source)'.
+        Calculate a final 'Intent Scoring' (1-10) based on all the buying signals detected. If no data is found, set Intent Scoring to 0.
         FINAL OUTPUT: Validated, enriched dataset ready for formatting.
         """,
         agent=data_validator,
         expected_output="Validated dataset with quality scores and intent analysis"
     )
 
-    # UPDATED: Enforce stricter JSON output requirements to prevent ValidationError
+    # CRITICAL: Added instruction to handle the integer field conflict by providing a default integer (0) if no score can be calculated.
     formatting_task = Task(
         description=f"""
         FORMAT FINAL OUTPUT FOR: {company_name}
@@ -197,7 +200,7 @@ def create_research_tasks(company_name):
         REQUIREMENTS:
         - **EVERY SINGLE FIELD MUST BE PRESENT IN THE FINAL JSON.** If a field's value is truly 'Not Found', you must explicitly set its value to "Not Found (No Source)".
         - The output must start with '{{' and end with '}}' with nothing else.
-        - Intent scoring must be an integer (1-10).
+        - **Intent scoring MUST be an integer (1-10) or 0.**
         
         Output must be valid JSON that can be parsed by the Pydantic model. **ONLY OUTPUT THE JSON STRING. DO NOT ADD ANY MARKDOWN, EXPLANATORY TEXT, OR BACKTICKS (```).**
         """,
@@ -214,7 +217,7 @@ st.set_page_config(
 )
 
 st.title("Syntel Company Data AI Agent")
-st.markdown("### Powered by CrewAI and Gemini/Serper Search")
+st.markdown("### Powered by CrewAI and Gemini/Serper Search") 
 
 # Initialize session state
 if 'research_history' not in st.session_state:
@@ -270,24 +273,27 @@ if submitted:
                 
                 st.success(f"Comprehensive research completed for **{company_input}**")
                 
-                # --- JSON Parsing Logic ---
+                # --- JSON Parsing Logic (Fixed for Extra Data Error) ---
                 try:
                     result_text = str(result)
                     
-                    # 1. NEW: More resilient JSON extraction logic
+                    # 1. Clean the result: Strip markdown code fences
                     cleaned_result = result_text.strip()
                     if cleaned_result.startswith('```json'):
                         cleaned_result = cleaned_result[7:]
                     if cleaned_result.endswith('```'):
                         cleaned_result = cleaned_result[:-3]
                         
+                    # 2. Isolate the JSON string by finding the first '{' and the last '}'
                     start_index = cleaned_result.index('{')
+                    # rindex is used to find the last occurrence of '}' to capture the whole object
                     end_index = cleaned_result.rindex('}') + 1
                     json_str = cleaned_result[start_index:end_index]
                     
+                    # 3. Attempt to decode the JSON
                     data = json.loads(json_str)
                     
-                    # 2. Validate the final JSON against the Pydantic schema
+                    # 4. Validate the final JSON against the Pydantic schema
                     validated_data = CompanyData(**data) 
                     
                     research_entry = {
