@@ -15,7 +15,8 @@ import sys
 # --- Configuration & Deployment Check ---
 # You MUST set both keys in Streamlit secrets
 SERPER_API_KEY = st.secrets.get("SERPER_API_KEY")
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") # NEW REQUIRED KEY
+# GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") # NEW REQUIRED KEY
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") # NEW REQUIRED KEY
 
 if not SERPER_API_KEY:
     st.error("❌ ERROR: SERPER_API_KEY not found in Streamlit secrets. Please set it to enable search.")
@@ -49,17 +50,17 @@ class CompanyData(BaseModel):
 
 # FIX 2: Replaced OpenAI/Ollama with the Gemini API for deployment
 def get_llm():
-    if GEMINI_API_KEY:
+    if GROQ_API_KEY:
         st.info("Using Gemini 2.5 Flash for live research.")
         
         # **CRITICAL FIX:** Return the model name in the LiteLLM format: provider/model
         # LiteLLM automatically uses the GEMINI_API_KEY from the environment.
-        return "gemini/gemini-2.5-flash"
+        return "groq/llama3-8b-8192"
         
         
     else:
         # Fallback to a mock LLM if key is missing
-        st.warning("⚠️ WARNING: GEMINI_API_KEY not found. Using a mock LLM for demonstration (no actual research will occur).")
+        st.warning("⚠️ WARNING: GROQI_API_KEY not found. Using a mock LLM for demonstration (no actual research will occur).")
         responses = [json.dumps(CompanyData(
             linkedin_url="Mock: linkedin.com/company/mockco", 
             company_website_url="Mock: mockco.com", 
